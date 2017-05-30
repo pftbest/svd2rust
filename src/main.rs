@@ -35,6 +35,14 @@ fn run() -> Result<()> {
                 .takes_value(true)
                 .value_name("FILE"),
         )
+        .arg(
+            Arg::with_name("base-crate")
+                .help("Crate that provides core types")
+                .required(false)
+                .short("b")
+                .takes_value(true)
+                .value_name("CRATE NAME"),
+        )
         .version(
             concat!(
                 env!("CARGO_PKG_VERSION"),
@@ -52,7 +60,7 @@ fn run() -> Result<()> {
     let device = svd::parse(xml);
 
     let mut items = vec![];
-    generate::device(&device, &mut items)?;
+    generate::device(&device, &mut items, matches.value_of("base-crate"))?;
 
     println!(
         "{}",

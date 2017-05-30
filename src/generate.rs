@@ -12,7 +12,8 @@ use errors::*;
 use util::{self, ToSanitizedPascalCase, ToSanitizedSnakeCase, U32Ext};
 
 /// Whole device generation
-pub fn device(d: &Device, items: &mut Vec<Tokens>) -> Result<()> {
+pub fn device(d: &Device, items: &mut Vec<Tokens>, base_crate_option: Option<&str>) -> Result<()> {
+    let base_crate = Ident::new(base_crate_option.unwrap_or("cortex_m"));
     let doc = format!(
         "Peripheral access API for {} microcontrollers \
          (generated using svd2rust v{})",
@@ -28,16 +29,23 @@ pub fn device(d: &Device, items: &mut Vec<Tokens>) -> Result<()> {
             #![feature(optin_builtin_traits)]
             #![no_std]
 
-            extern crate cortex_m;
+            extern crate #base_crate;
             extern crate vcell;
 
             use core::ops::Deref;
 
-            use cortex_m::peripheral::Peripheral;
+            use #base_crate::peripheral::Peripheral;
         },
     );
 
-    ::generate::interrupt(&d.peripherals, items);
+    ::generate::interrupt(&d.peripherals, items, &base_crate);
+
+    if base_crate_option.is_some() {
+        for p in &d.peripherals {
+            ::generate::peripheral(p, &d.peripherals, items, &d.defaults)?;
+        }
+        return Ok(())
+    }
 
     const CORE_PERIPHERALS: &'static [&'static str] = &[
         "CPUID",
@@ -58,8 +66,8 @@ pub fn device(d: &Device, items: &mut Vec<Tokens>) -> Result<()> {
         let p = Ident::new(*p);
 
         items.push(quote! {
-            pub use cortex_m::peripheral::#ty_;
-            pub use cortex_m::peripheral::#p;
+            pub use #base_crate::peripheral::#ty_;
+            pub use #base_crate::peripheral::#p;
         });
     }
 
@@ -76,7 +84,7 @@ pub fn device(d: &Device, items: &mut Vec<Tokens>) -> Result<()> {
 }
 
 /// Generates code for `src/interrupt.rs`
-pub fn interrupt(peripherals: &[Peripheral], items: &mut Vec<Tokens>) {
+pub fn interrupt(peripherals: &[Peripheral], items: &mut Vec<Tokens>, base_crate: &Ident) {
     let interrupts = peripherals
         .iter()
         .flat_map(|p| p.interrupt.iter())
@@ -102,9 +110,9 @@ pub fn interrupt(peripherals: &[Peripheral], items: &mut Vec<Tokens>) {
     let mut mod_items = vec![];
     mod_items.push(
         quote! {
-            use cortex_m::ctxt::Context;
-            use cortex_m::exception;
-            use cortex_m::interrupt::Nr;
+            use #base_crate::ctxt::Context;
+            use #base_crate::exception;
+            use #base_crate::interrupt::Nr;
         },
     );
     for interrupt in &interrupts {
@@ -186,7 +194,7 @@ pub fn interrupt(peripherals: &[Peripheral], items: &mut Vec<Tokens>) {
     if uses_reserved {
         mod_items.push(
             quote! {
-                use cortex_m::Reserved;
+                use #base_crate::Reserved;
             },
         );
     }
