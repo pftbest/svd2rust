@@ -27,12 +27,15 @@ pub fn render(d: &Device, target: &Target, nightly: bool, device_x: &mut String)
         });
     }
 
-    if *target != Target::None && *target != Target::CortexM {
-        out.push(quote! {
-            #![cfg_attr(feature = "rt", feature(global_asm))]
-            #![cfg_attr(feature = "rt", feature(use_extern_macros))]
-            #![cfg_attr(feature = "rt", feature(used))]
-        });
+    match *target {
+        Target::RISCV => {
+            out.push(quote! {
+                #![cfg_attr(feature = "rt", feature(global_asm))]
+                #![cfg_attr(feature = "rt", feature(use_extern_macros))]
+                #![cfg_attr(feature = "rt", feature(used))]
+            });
+        },
+        Target::None | Target::CortexM | Target::Msp430 => {}
     }
 
     out.push(quote! {
@@ -43,11 +46,14 @@ pub fn render(d: &Device, target: &Target, nightly: bool, device_x: &mut String)
         #![no_std]
     });
 
-    if *target != Target::CortexM {
-        out.push(quote! {
-            #![feature(const_fn)]
-            #![feature(try_from)]
-        });
+    match *target {
+        Target::None | Target::RISCV => {
+            out.push(quote! {
+                #![feature(const_fn)]
+                #![feature(try_from)]
+            });
+        },
+        Target::CortexM | Target::Msp430 => {},
     }
 
     if nightly {
@@ -69,8 +75,6 @@ pub fn render(d: &Device, target: &Target, nightly: bool, device_x: &mut String)
                 extern crate msp430;
                 #[cfg(feature = "rt")]
                 extern crate msp430_rt;
-                #[cfg(feature = "rt")]
-                pub use msp430_rt::default_handler;
             });
         }
         Target::RISCV => {

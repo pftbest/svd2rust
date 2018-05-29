@@ -159,29 +159,11 @@ pub fn render(
             });
         }
         Target::Msp430 => {
-            let aliases = names
-                .iter()
-                .map(|n| {
-                    format!(
-                        "
-.weak {0}
-{0} = DH_TRAMPOLINE",
-                        n
-                    )
-                })
-                .collect::<Vec<_>>()
-                .concat();
+            for name in &names {
+                writeln!(device_x, "PROVIDE({} = DefaultHandler);" ,name).unwrap();
+            }
 
-            mod_items.push(quote! {
-                #[cfg(feature = "rt")]
-                global_asm!("
-                DH_TRAMPOLINE:
-                    br #DEFAULT_HANDLER
-                ");
-
-                #[cfg(feature = "rt")]
-                global_asm!(#aliases);
-
+            root.push(quote! {
                 #[cfg(feature = "rt")]
                 extern "msp430-interrupt" {
                     #(fn #names();)*
@@ -193,16 +175,71 @@ pub fn render(
                     _reserved: u32,
                 }
 
-                #[allow(private_no_mangle_statics)]
                 #[cfg(feature = "rt")]
                 #[doc(hidden)]
                 #[link_section = ".vector_table.interrupts"]
                 #[no_mangle]
-                #[used]
-                pub static INTERRUPTS:
-                    [Vector; #n] = [
-                        #(#elements,)*
-                    ];
+                pub static __INTERRUPTS: [Vector; #n] = [
+                    #(#elements,)*
+                ];
+
+                /// Macro to override a device specific interrupt handler
+                ///
+                /// # Syntax
+                ///
+                /// ``` ignore
+                /// interrupt!(
+                ///     // Name of the interrupt
+                ///     $Name:ident,
+                ///
+                ///     // Path to the interrupt handler (a function)
+                ///     $handler:path,
+                ///
+                ///     // Optional, state preserved across invocations of the handler
+                ///     state: $State:ty = $initial_state:expr,
+                /// );
+                /// ```
+                ///
+                /// Where `$Name` must match the name of one of the variants of the `Interrupt`
+                /// enum.
+                ///
+                /// The handler must have signature `fn()` is no state was associated to it;
+                /// otherwise its signature must be `fn(&mut $State)`.
+                #[cfg(feature = "rt")]
+                #[macro_export]
+                macro_rules! interrupt {
+                    ($Name:ident, $handler:path,state: $State:ty = $initial_state:expr) => {
+                        #[allow(unsafe_code)]
+                        #[deny(private_no_mangle_fns)] // raise an error if this item is not accessible
+                        #[no_mangle]
+                        pub unsafe extern "msp430-interrupt" fn $Name() {
+                            static mut STATE: $State = $initial_state;
+
+                            // check that this interrupt exists
+                            let _ = $crate::Interrupt::$Name;
+
+                            // validate the signature of the user provided handler
+                            let f: fn(&mut $State) = $handler;
+
+                            f(&mut STATE)
+                        }
+                    };
+
+                    ($Name:ident, $handler:path) => {
+                        #[allow(unsafe_code)]
+                        #[deny(private_no_mangle_fns)] // raise an error if this item is not accessible
+                        #[no_mangle]
+                        pub unsafe extern "msp430-interrupt" fn $Name() {
+                            // check that this interrupt exists
+                            let _ = $crate::Interrupt::$Name;
+
+                            // validate the signature of the user provided handler
+                            let f: fn() = $handler;
+
+                            f()
+                        }
+                    };
+                }
             });
         }
         Target::RISCV => {}
@@ -225,87 +262,83 @@ pub fn render(
         }
     };
 
-    if *target == Target::CortexM {
-        root.push(interrupt_enum);
-    } else {
-        mod_items.push(quote! {
-            use core::convert::TryFrom;
-
-            #interrupt_enum
-
-            #[derive(Debug, Copy, Clone)]
-            pub struct TryFromInterruptError(());
-
-            impl TryFrom<u8> for Interrupt {
-                type Error = TryFromInterruptError;
-
-                #[inline]
-                fn try_from(value: u8) -> Result<Self, Self::Error> {
-                    match value {
-                        #(#from_arms)*
-                        _ => Err(TryFromInterruptError(())),
-                    }
-                }
-            }
-        });
-    }
-
-    if *target != Target::None {
-        let abi = match *target {
-            Target::Msp430 => "msp430-interrupt",
-            _ => "C",
-        };
-
-        if *target != Target::CortexM {
+    match *target {
+        Target::CortexM | Target::Msp430 => {
+            root.push(interrupt_enum);
+        },
+        Target::None | Target::RISCV => {
             mod_items.push(quote! {
-                #[cfg(feature = "rt")]
-                #[macro_export]
-                macro_rules! interrupt {
-                    ($NAME:ident, $path:path, locals: {
-                        $($lvar:ident:$lty:ty = $lval:expr;)*
-                    }) => {
-                        #[allow(non_snake_case)]
-                        mod $NAME {
-                            pub struct Locals {
-                                $(
-                                    pub $lvar: $lty,
-                                )*
-                            }
-                        }
+                use core::convert::TryFrom;
 
-                        #[allow(non_snake_case)]
-                        #[no_mangle]
-                        pub extern #abi fn $NAME() {
-                            // check that the handler exists
-                            let _ = $crate::interrupt::Interrupt::$NAME;
+                #interrupt_enum
 
-                            static mut LOCALS: self::$NAME::Locals =
-                                self::$NAME::Locals {
-                                    $(
-                                        $lvar: $lval,
-                                    )*
-                                };
+                #[derive(Debug, Copy, Clone)]
+                pub struct TryFromInterruptError(());
 
-                            // type checking
-                            let f: fn(&mut self::$NAME::Locals) = $path;
-                            f(unsafe { &mut LOCALS });
-                        }
-                    };
-                    ($NAME:ident, $path:path) => {
-                        #[allow(non_snake_case)]
-                        #[no_mangle]
-                        pub extern #abi fn $NAME() {
-                            // check that the handler exists
-                            let _ = $crate::interrupt::Interrupt::$NAME;
+                impl TryFrom<u8> for Interrupt {
+                    type Error = TryFromInterruptError;
 
-                            // type checking
-                            let f: fn() = $path;
-                            f();
+                    #[inline]
+                    fn try_from(value: u8) -> Result<Self, Self::Error> {
+                        match value {
+                            #(#from_arms)*
+                            _ => Err(TryFromInterruptError(())),
                         }
                     }
                 }
             });
-        }
+        },
+    }
+
+    if *target == Target::RISCV {
+        mod_items.push(quote! {
+            #[cfg(feature = "rt")]
+            #[macro_export]
+            macro_rules! interrupt {
+                ($NAME:ident, $path:path, locals: {
+                    $($lvar:ident:$lty:ty = $lval:expr;)*
+                }) => {
+                    #[allow(non_snake_case)]
+                    mod $NAME {
+                        pub struct Locals {
+                            $(
+                                pub $lvar: $lty,
+                            )*
+                        }
+                    }
+
+                    #[allow(non_snake_case)]
+                    #[no_mangle]
+                    pub extern "C" fn $NAME() {
+                        // check that the handler exists
+                        let _ = $crate::interrupt::Interrupt::$NAME;
+
+                        static mut LOCALS: self::$NAME::Locals =
+                            self::$NAME::Locals {
+                                $(
+                                    $lvar: $lval,
+                                )*
+                            };
+
+                        // type checking
+                        let f: fn(&mut self::$NAME::Locals) = $path;
+                        f(unsafe { &mut LOCALS });
+                    }
+                };
+                ($NAME:ident, $path:path) => {
+                    #[allow(non_snake_case)]
+                    #[no_mangle]
+                    pub extern "C" fn $NAME() {
+                        // check that the handler exists
+                        let _ = $crate::interrupt::Interrupt::$NAME;
+
+                        // type checking
+                        let f: fn() = $path;
+                        f();
+                    }
+                }
+            }
+        });
     }
 
     if interrupts.len() > 0 {
@@ -316,10 +349,13 @@ pub fn render(
             }
         });
 
-        if *target != Target::CortexM {
-            root.push(quote! {
-                pub use interrupt::Interrupt;
-            });
+        match *target {
+            Target::None | Target::RISCV => {
+                root.push(quote! {
+                    pub use interrupt::Interrupt;
+                });
+            },
+            Target::CortexM  | Target::Msp430 => {},
         }
     }
 
